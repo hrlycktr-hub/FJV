@@ -67,4 +67,26 @@ if st.button("BEREGN PROGNOSE", type="primary"):
     if "Elkedel" in bud_type:
         netto_aktiv_kw = netto_normal_kw + (ELKEDEL_MW * 1000)
     else:
-        netto_aktiv_kw = netto_normal_kw + (MOTOR_VAR
+        netto_aktiv_kw = netto_normal_kw + (MOTOR_VARME_MW * 1000)
+    
+    # Tid til grænser (100% eller 0%)
+    if netto_aktiv_kw > 0:
+        rest_mwh = TANK_A_MAX_MWH - tank_mwh
+        timer = rest_mwh / (netto_aktiv_kw / 1000)
+        stop_tid = datetime.now() + timedelta(hours=timer)
+        st.error(f"⚠️ **ADVARSEL:** Ved aktivering rammer du 100% om ca. **{round(timer, 1)} timer** (kl. {stop_tid.strftime('%H:%M')}).")
+    elif netto_aktiv_kw < 0:
+        timer = tank_mwh / (abs(netto_aktiv_kw) / 1000)
+        st.success(f"📉 Tanken tømmes trods aktivering. Tom om ca. **{round(timer, 1)} timer**.")
+    else:
+        st.info("Balance: Tanken hverken fyldes eller tømmes.")
+    
+    st.info(f"Biokedlen yder lige nu {bio_kw} kW (Baseret på {tank_pct}% i Tank A).")
+
+    # REFERENCE TABEL
+    st.write("---")
+    st.write("**Reference (Biokedel trin):**")
+    st.table(pd.DataFrame({
+        "Tank A (%)": ["0-30%", "31-40%", "41-50%", "51-60%", "61-90%"],
+        "Effekt (kW)": [1000, 900, 800, 700, 600]
+    }))
