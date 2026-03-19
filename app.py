@@ -41,14 +41,15 @@ bio_kw = beregn_bio_effekt(tank_pct)
 def hent_spotpris():
     try:
         url = "https://api.energidataservice.dk/dataset/Elspotprices?limit=1&filter={'PriceArea':['DK2']}&sort=HourDK desc"
-        return requests.get(url).json()['records'][0]['SpotPriceDKK']
+        res = requests.get(url).json()
+        return res['records'][0]['SpotPriceDKK']
     except: return 200.0
 
 spotpris = hent_spotpris()
 st.metric("Aktuel Spotpris (DK2)", f"{round(spotpris, 2)} kr")
 
 # Chance-logik
-if bud_type == "Elkedel (Ned-regulering)":
+if "Elkedel" in bud_type:
     chance = "Høj (>70%)" if bud_pris > spotpris + 50 else "Middel"
 else:
     chance = "Høj (>70%)" if bud_pris < spotpris - 50 else "Middel"
@@ -62,6 +63,8 @@ if st.button("BEREGN PROGNOSE", type="primary"):
     st.divider()
     st.write(f"### Prognose ved {bud_type}")
     
-    # Beregn netto-ændring ved mFRR aktivering
+    # Her var fejlen - parenteserne er nu på plads:
     if "Elkedel" in bud_type:
-        netto_aktiv_kw = netto_normal_kw + (ELKEDEL_MW * 100
+        netto_aktiv_kw = netto_normal_kw + (ELKEDEL_MW * 1000)
+    else:
+        netto_aktiv_kw = netto_normal_kw + (MOTOR_VAR
