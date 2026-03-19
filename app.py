@@ -2,10 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 
-# KONFIGURATION SKULDELEV
-BIO_MIN = 700
-BIO_MAX = 1200
-TANK_A_LIMIT = 70
+# NY KONFIGURATION (OPDATERET)
+BIO_MAX = 1000  # Din nye max effekt
 
 st.set_page_config(page_title="Skuldelev Drift", page_icon="🔥")
 st.title("Skuldelev Drifts-Agent ⚡")
@@ -40,18 +38,20 @@ if st.button("BEREGN PLAN", type="primary"):
     
     # LOGIK FOR SLUK/DRIFT
     total = tank_a + tank_b
-    if total > 35 and (vejr == "Fuld sol" or billige_timer > 3):
+    if total > 40 and (vejr == "Fuld sol" or billige_timer > 3):
         st.success("✅ ANBEFALING: SLUK BIOKEDEL HELT")
         st.write(f"Du har {total} MWh på lager. Sol/El bør dække behovet.")
     else:
-        st.warning("🔥 KØR BIOKEDEL (REDUCERET LAST)")
+        st.warning("🔥 KØR BIOKEDEL (FØLG SETPUNKTER)")
         
-        # TRIN-TABEL
+        # NY TRIN-TABEL BASERET PÅ DINE TANK-PROCENTER
+        # Vi antager her at 70 MWh er 100% fyldt i Tank A
         data = {
-            "Tank A (MWh)": ["0-25", "26-45", "46-65", ">68"],
-            "Biokedel Last": ["1200 kW", "900 kW", f"{BIO_MIN} kW", "0 kW (STOP)"]
+            "Tank A Indhold (%)": ["0 - 30%", "31 - 40%", "41 - 50%", "51 - 60%", "61 - 90%", "> 90%"],
+            "Setpunkt (%)": ["100%", "90%", "80%", "70%", "60%", "STOP"],
+            "Effekt (kW)": ["1.000 kW", "900 kW", "800 kW", "700 kW", "600 kW", "0 kW"]
         }
         st.table(pd.DataFrame(data))
     
     if tank_a > 62:
-        st.error(f"OBS: Tank A er på {tank_a} MWh. SRO skifter til Tank B ved 70 MWh!")
+        st.error(f"OBS: Tank A er tæt på 70 MWh (skifte-grænsen)!")
