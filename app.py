@@ -19,16 +19,19 @@ def get_bio(p):
 st.set_page_config(page_title="Skuldelev Drift", page_icon="⚡")
 st.title("Skuldelev Drifts-Agent ⚡")
 
-# --- 2. DATA HENTNING (SPOTPRIS + PROGNOSE) ---
+# --- 2. DATA HENTNING (FORBEDRET) ---
 @st.cache_data(ttl=300)
 def hent_el_data():
     try:
-        url = "https://api.energidataservice.dk/dataset/Elspotprices?limit=48&filter={'PriceArea':['DK2']}&sort=HourDK desc"
-        res = requests.get(url).json()
+        # Vi henter lidt flere timer for at være sikre på at have både fortid og fremtid
+        url = "https://api.energidataservice.dk/dataset/Elspotprices?limit=100&filter={'PriceArea':['DK2']}&sort=HourDK desc"
+        res = requests.get(url, timeout=5).json()
         df = pd.DataFrame(res['records'])
         df['HourDK'] = pd.to_datetime(df['HourDK'])
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Kunne ikke hente elpriser: {e}")
+        return pd.DataFrame()
 
 el_df = hent_el_data()
 
@@ -43,17 +46,27 @@ with col2:
 with col3:
     aftag_nu = st.number_input("Aftag (kW)", 0, 3000, 1000)
 
-# --- 4. ELPRIS & PROGNOSE GRAF ---
+# --- 4. ELPRIS & GRAF VISNING ---
+st.write("---")
 if not el_df.empty:
-    st.write("---")
     nu = datetime.now()
-    fremtid_df = el_df[el_df['HourDK'] >= (nu - timedelta(hours=1))].sort_values('HourDK')
+    # Filtrer så vi ser fra 4 timer siden til 20 timer frem
+    vis_df = el_df[(el_df['HourDK'] >= (nu - timedelta(hours=4))) & 
+                   (el_df['HourDK'] <= (nu + timedelta(hours=20)))].sort_values('HourDK')
     
-    st.line_chart(fremtid_df, x='HourDK', y='SpotPriceDKK')
-    
-    aktuel_pris = fremtid_df.iloc[0]['SpotPriceDKK']
-    st.info(f"**Spotpris lige nu:** {round(aktuel_pris, 2)} kr/MWh")
+    if not vis_df.empty:
+        st.subheader("Elpris-prognose (DK2)")
+        # Vi laver grafen lidt højere her
+        st.line_chart(vis_df, x='HourDK', y='SpotPriceDKK')
+        
+        # Find den aktuelle pris (nærmeste time)
+        aktuel_pris = vis_df.iloc[0]['SpotPriceDKK']
+        st.info(f"**Spotpris lige nu:** {round(aktuel_pris, 2)} kr/MWh")
+    else:
+        st.warning("Ingen prisdata fundet for de næste timer.")
+        aktuel_pris = 200.0
 else:
+    st.warning("Venter på data fra Energidataservice... Prøv at opdatere om lidt.")
     aktuel_pris = 200.0
 
 # --- 5. mFRR ELKEDEL ---
@@ -61,40 +74,45 @@ st.header("2. mFRR Elkedel (Ned)")
 bud_elkedel = st.number_input("Bud Elkedel (kr/MWh)", value=150, key="el_bud")
 
 if not el_df.empty:
-    billige_timer = len(fremtid_df.head(6)[fremtid_df['SpotPriceDKK'] < bud_elkedel])
+    # Chance beregning: Vi kigger på de næste 6 timer
+    fremtid = el_df[el_df['HourDK'] >= datetime.now()].sort_values('HourDK').head(6)
+    billige_timer = len(fremtid[fremtid['SpotPriceDKK'] < bud_elkedel])
+    
     if billige_timer > 0:
-        st.success(f"Chance: Høj! ({billige_timer} timer under bud næste 6t)")
+        st.success(f"**Aktiverings-chance: HØJ** ({billige_timer} ud af de næste 6 timer er under dit bud)")
     else:
-        st.warning("Chance: Lav (Prisen er over dit bud)")
+        st.warning("**Aktiverings-chance: LAV** (Spotprisen er lige nu højere end dit bud)")
 
 if st.button("Beregn Elkedel-scenarie"):
     bio = get_bio(tank_pct)
     netto = (bio + (ELKEDEL_MW * 1000)) - aftag_nu
     if netto > 0:
         timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
-        st.error(f"Tank A rammer 100% om {round(timer, 1)} timer ved aktivering.")
+        st.error(f"Ved aktivering: Tank A er 100% fyldt om ca. {round(timer, 1)} timer.")
     else:
-        st.success("Tanken tømmes stadig.")
+        st.success("Tanken tømmes stadig selvom elkedlen kører.")
 
 # --- 6. mFRR MOTOR ---
 st.header("3. mFRR Motor (Op)")
 bud_motor = st.number_input("Bud Motor (kr/MWh)", value=450, key="mot_bud")
 
 if not el_df.empty:
-    dyre_timer = len(fremtid_df.head(6)[fremtid_df['SpotPriceDKK'] > bud_motor])
+    fremtid = el_df[el_df['HourDK'] >= datetime.now()].sort_values('HourDK').head(6)
+    dyre_timer = len(fremtid[fremtid['SpotPriceDKK'] > bud_motor])
+    
     if dyre_timer > 0:
-        st.success(f"Chance: Høj! ({dyre_timer} timer over bud næste 6t)")
+        st.success(f"**Aktiverings-chance: HØJ** ({dyre_timer} ud af de næste 6 timer er over dit bud)")
     else:
-        st.info("Chance: Middel (Peak-timer giver bedst chance)")
+        st.info("**Aktiverings-chance: MIDDEL** (Typisk bedst chance i peak-timerne)")
 
 if st.button("Beregn Motor-scenarie"):
     bio = get_bio(tank_pct)
     netto = (bio + (MOTOR_VARME_MW * 1000)) - aftag_nu
     if netto > 0:
         timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
-        st.warning(f"Tank A rammer 100% om {round(timer, 1)} timer ved aktivering.")
+        st.warning(f"Ved aktivering: Tank A er 100% fyldt om ca. {round(timer, 1)} timer.")
     else:
-        st.success("Tanken tømmes stadig.")
+        st.success("Tanken tømmes stadig selvom motoren kører.")
 
 # --- 7. BEREGN NORMAL DRIFT ---
 st.write("---")
@@ -104,9 +122,9 @@ if st.button("BEREGN NORMAL DRIFT (BIO)", type="primary"):
     st.write(f"Biokedel: {bio} kW. Netto: {netto} kW.")
     if netto > 0:
         timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
-        st.write(f"Fuld om ca. {round(timer, 1)} timer.")
+        st.write(f"Tank A er 100% om ca. {round(timer, 1)} timer.")
     else:
         timer = tank_mwh / (abs(netto) / 1000)
-        st.write(f"Tom om ca. {round(timer, 1)} timer.")
+        st.write(f"Tank A er tom (0%) om ca. {round(timer, 1)} timer.")
 
-st.caption(f"Sidst opdateret: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Opdateret: {datetime.now().strftime('%H:%M:%S')}")
