@@ -11,14 +11,14 @@ st.title("Skuldelev Drifts-Agent ⚡")
 
 # --- 1. INPUT FRA DIG ---
 st.header("Status på værket")
-col1, col2 = st.columns(3)
+# Her har jeg rettet fejlen - nu er der 3 navne til 3 kolonner
+col1, col2, col3 = st.columns(3)
 with col1:
     tank_a = st.number_input("Tank A (MWh)", 0.0, 80.0, 35.0)
 with col2:
     tank_b = st.number_input("Tank B (MWh)", 0.0, 80.0, 10.0)
 with col3:
-    # HER INDTASTER DU HVAD BYEN BRUGER LIGE NU
-    aftag_nu = st.number_input("Aktuelt Aftag (kW)", 0, 3000, 1150)
+    aftag_nu = st.number_input("Aktuelt Aftag (kW)", 0, 3000, 1000)
 
 vejr = st.selectbox("Vejrudsigt", ["Overskyet", "Nogen sol", "Fuld sol"])
 
