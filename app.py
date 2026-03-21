@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# --- 1. KONFIGURATION ---
+# --- 1. KONFIGURATION & FUNKTIONER ---
 TANK_A_MAX_MWH = 70.0  
 ELKEDEL_MW = 2.0       
 MOTOR_VARME_MW = 1.2   
@@ -19,100 +19,94 @@ def get_bio(p):
 st.set_page_config(page_title="Skuldelev Drift", page_icon="⚡")
 st.title("Skuldelev Drifts-Agent ⚡")
 
-# --- 2. DATA-HENTNING ---
-@st.cache_data(ttl=600)
+# --- 2. DATA HENTNING (SPOTPRIS + PROGNOSE) ---
+@st.cache_data(ttl=300)
 def hent_el_data():
     try:
-        url = "https://api.energidataservice.dk/dataset/Elspotprices?limit=100"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            raw_data = response.json()['records']
-            df = pd.DataFrame(raw_data)
-            df = df[df['PriceArea'] == 'DK2']
-            df['HourDK'] = pd.to_datetime(df['HourDK'])
-            return df.sort_values('HourDK', ascending=False)
-        return pd.DataFrame()
-    except:
-        return pd.DataFrame()
+        url = "https://api.energidataservice.dk/dataset/Elspotprices?limit=48&filter={'PriceArea':['DK2']}&sort=HourDK desc"
+        res = requests.get(url).json()
+        df = pd.DataFrame(res['records'])
+        df['HourDK'] = pd.to_datetime(df['HourDK'])
+        return df
+    except: return pd.DataFrame()
 
 el_df = hent_el_data()
 
-# --- 3. STATUS & GRÆNSER ---
-st.header("1. Aktuel Status & Max-priser")
-col_s1, col_s2 = st.columns(2)
-with col_s1:
-    tank_pct = st.number_input("Tank A (%)", 0, 100, 44)
+# --- 3. STATUS & AFTAG ---
+st.header("1. Aktuel Status")
+col1, col2, col3 = st.columns(3)
+with col1:
+    tank_pct = st.number_input("Tank A (%)", 0, 100, 50)
     tank_mwh = (tank_pct / 100) * TANK_A_MAX_MWH
-with col_s2:
+with col2:
+    tank_b = st.number_input("Tank B (MWh)", 0.0, 80.0, 10.0)
+with col3:
     aftag_nu = st.number_input("Aftag (kW)", 0, 3000, 1000)
 
-# Økonomiske stop-grænser
-col_m1, col_m2 = st.columns(2)
-with col_m1:
-    max_pris_el = st.number_input("Max pris Elkedel (kr/MWh)", value=400)
-with col_m2:
-    max_pris_mot = st.number_input("Max pris Motor (kr/MWh)", value=800)
-
-# --- 4. VISNING AF PRIS ---
-st.write("---")
+# --- 4. ELPRIS & PROGNOSE GRAF ---
 if not el_df.empty:
+    st.write("---")
     nu = datetime.now()
-    vis_df = el_df[(el_df['HourDK'] >= (nu - timedelta(hours=6)))].sort_values('HourDK')
-    aktuel_pris = el_df.iloc[0]['SpotPriceDKK']
+    fremtid_df = el_df[el_df['HourDK'] >= (nu - timedelta(hours=1))].sort_values('HourDK')
     
-    st.subheader(f"Spotpris lige nu: {round(aktuel_pris, 2)} kr")
-    st.line_chart(vis_df, x='HourDK', y='SpotPriceDKK')
+    st.line_chart(fremtid_df, x='HourDK', y='SpotPriceDKK')
+    
+    aktuel_pris = fremtid_df.iloc[0]['SpotPriceDKK']
+    st.info(f"**Spotpris lige nu:** {round(aktuel_pris, 2)} kr/MWh")
 else:
-    aktuel_pris = st.number_input("Manuel Elpris (kr/MWh)", value=250)
+    aktuel_pris = 200.0
 
-# --- 5. mFRR ELKEDEL (NED) ---
+# --- 5. mFRR ELKEDEL ---
 st.header("2. mFRR Elkedel (Ned)")
+bud_elkedel = st.number_input("Bud Elkedel (kr/MWh)", value=150, key="el_bud")
 
-# Tjek om spotprisen er for høj til elkedel-drift
-if aktuel_pris > max_pris_el:
-    st.error(f"🚫 Økonomisk Stop: Spotprisen er for høj til elkedel-drift (> {max_pris_el} kr)")
-
-anbefalet_el = aktuel_pris + 60
-budloeb_el = aktuel_pris + 25
-st.markdown(f"💡 *Anbefalet bud for aktivering:* **>{round(anbefalet_el)} kr** ({round(budloeb_el)} kr)")
-
-bud_elkedel = st.number_input("Dit bud Elkedel (kr/MWh)", value=int(anbefalet_el), key="el_bud")
+if not el_df.empty:
+    billige_timer = len(fremtid_df.head(6)[fremtid_df['SpotPriceDKK'] < bud_elkedel])
+    if billige_timer > 0:
+        st.success(f"Chance: Høj! ({billige_timer} timer under bud næste 6t)")
+    else:
+        st.warning("Chance: Lav (Prisen er over dit bud)")
 
 if st.button("Beregn Elkedel-scenarie"):
     bio = get_bio(tank_pct)
     netto = (bio + (ELKEDEL_MW * 1000)) - aftag_nu
-    timer = (TANK_A_MAX_MWH - tank_mwh) / (max(netto, 1) / 1000)
-    st.error(f"Ved aktivering: Tank A er 100% fyldt om ca. {round(timer, 1)} timer.")
+    if netto > 0:
+        timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
+        st.error(f"Tank A rammer 100% om {round(timer, 1)} timer ved aktivering.")
+    else:
+        st.success("Tanken tømmes stadig.")
 
-# --- 6. mFRR MOTOR (OP) ---
-st.write("---")
+# --- 6. mFRR MOTOR ---
 st.header("3. mFRR Motor (Op)")
+bud_motor = st.number_input("Bud Motor (kr/MWh)", value=450, key="mot_bud")
 
-# Tjek om spotprisen er for høj til rentabel motordrift
-if aktuel_pris > max_pris_mot:
-    st.error(f"🚫 Økonomisk Stop: Spotprisen er for høj til motordrift (> {max_pris_mot} kr)")
-
-anbefalet_mot = aktuel_pris - 70
-budloeb_mot = aktuel_pris - 30
-st.markdown(f"💡 *Anbefalet bud for aktivering:* **<{round(anbefalet_mot)} kr** ({round(budloeb_mot)} kr)")
-
-bud_motor = st.number_input("Dit bud Motor (kr/MWh)", value=int(anbefalet_mot), key="mot_bud")
+if not el_df.empty:
+    dyre_timer = len(fremtid_df.head(6)[fremtid_df['SpotPriceDKK'] > bud_motor])
+    if dyre_timer > 0:
+        st.success(f"Chance: Høj! ({dyre_timer} timer over bud næste 6t)")
+    else:
+        st.info("Chance: Middel (Peak-timer giver bedst chance)")
 
 if st.button("Beregn Motor-scenarie"):
     bio = get_bio(tank_pct)
     netto = (bio + (MOTOR_VARME_MW * 1000)) - aftag_nu
-    timer = (TANK_A_MAX_MWH - tank_mwh) / (max(netto, 1) / 1000)
-    st.warning(f"Ved aktivering: Tank A er 100% fyldt om ca. {round(timer, 1)} timer.")
-
-# --- 7. NORMAL DRIFT ---
-st.write("---")
-if st.button("BEREGN NORMAL DRIFT", type="primary"):
-    bio = get_bio(tank_pct)
-    netto = bio - aftag_nu
-    st.info(f"Biokedel last: {bio} kW")
     if netto > 0:
         timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
-        st.write(f"Tanken er fuld om ca. {round(timer, 1)} timer.")
+        st.warning(f"Tank A rammer 100% om {round(timer, 1)} timer ved aktivering.")
+    else:
+        st.success("Tanken tømmes stadig.")
+
+# --- 7. BEREGN NORMAL DRIFT ---
+st.write("---")
+if st.button("BEREGN NORMAL DRIFT (BIO)", type="primary"):
+    bio = get_bio(tank_pct)
+    netto = bio - aftag_nu
+    st.write(f"Biokedel: {bio} kW. Netto: {netto} kW.")
+    if netto > 0:
+        timer = (TANK_A_MAX_MWH - tank_mwh) / (netto / 1000)
+        st.write(f"Fuld om ca. {round(timer, 1)} timer.")
     else:
         timer = tank_mwh / (abs(netto) / 1000)
-        st.write(f"Tanken er tom om ca. {round(timer, 1)} timer.")
+        st.write(f"Tom om ca. {round(timer, 1)} timer.")
+
+st.caption(f"Sidst opdateret: {datetime.now().strftime('%H:%M:%S')}")
