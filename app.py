@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# --- 1. KONFIGURATION (OPDATERET TIL 1260 KW NU) ---
+# --- 1. KONFIGURATION ---
 TANK_A_MAX_MWH = 70.0  
 ELKEDEL_MW = 2.0       
 MOTOR_VARME_MW = 1.2   
@@ -26,7 +26,6 @@ def hent_data():
     el_df = pd.DataFrame()
     vejr_df = pd.DataFrame()
     
-    # ELPRISER
     try:
         url_el = "https://api.energidataservice.dk/dataset/Elspotprices?limit=100&filter={'PriceArea':['DK2']}"
         res_el = requests.get(url_el, timeout=10).json()['records']
@@ -35,14 +34,12 @@ def hent_data():
         el_df = df_el.sort_values('Tid')
     except: pass
 
-    # VEJR (YR.NO)
     try:
         headers = {'User-Agent': 'SkuldelevApp/2.0 kontakt: fjv@mail.dk'}
         url_v = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}"
         res_v = requests.get(url_v, headers=headers, timeout=10).json()
         rows = []
         for entry in res_v['properties']['timeseries'][:24]:
-            # Vi fjerner tidszoner og sikrer 24-timers format internt
             tid = pd.to_datetime(entry['time']).tz_convert('Europe/Copenhagen').tz_localize(None)
             rows.append({
                 'Tid': tid,
@@ -55,20 +52,20 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. INPUT (JUSTERET TIL 1260 KW VED ~5.5 GRADER) ---
+# --- 3. INPUT (OPTIMERET TIL 1260 KW VED ~5.5 GRADER) ---
 st.header("1. Status & SCADA")
 tank_pct_nu = st.slider("Aktuel Tank A (%)", 0, 100, 44)
 tank_mwh_nu = (tank_pct_nu / 100) * TANK_A_MAX_MWH
 
 col_scada1, col_scada2 = st.columns(2)
-# Basis sænket lidt for at ramme 1260 kW præcist nu
-basis_aftag = col_scada1.number_input("Basis v. 10°C (kW)", value=820)
-vejr_faktor = col_scada2.number_input("kW stigning pr. grad fald", value=100) # Højere faktor pga. vekslere
+# Disse tal er nu fintrimmet til jeres 1260 kW observation
+basis_aftag = col_scada1.number_input("Basis v. 10°C (kW)", value=950)
+vejr_faktor = col_scada2.number_input("kW stigning pr. grad fald", value=70)
 
-# --- 4. BEREGNING ---
+# --- 4. BEREGNING AF PROGNOSE ---
 if not vejr_df.empty:
     prognose = vejr_df.copy()
-    # Formatering af tid til 24-timers streng til aksen
+    # 24-timers format til graferne
     prognose['Klokkeslæt'] = prognose['Tid'].dt.strftime('%H:%M')
     
     beholdning = tank_mwh_nu
@@ -86,7 +83,7 @@ if not vejr_df.empty:
     prognose['Tank_MWh'] = beholdning_log
     prognose['Aftag_kW'] = aftag_log
 
-# --- 5. GRAFER (MED 24-TIMERS FORMAT) ---
+# --- 5. GRAFER (24-TIMERS FORMAT) ---
 st.write("---")
 
 # ELPRIS
@@ -110,7 +107,7 @@ st.subheader("Tank-prognose (MWh)")
 if not vejr_df.empty:
     st.line_chart(prognose.set_index('Klokkeslæt')['Tank_MWh'])
 
-# --- 6. mFRR ---
+# --- 6. mFRR BEREGNER ---
 st.write("---")
 st.header("2. Aktiverings-tjek")
 aftag_nu_calc = prognose['Aftag_kW'].iloc[0] if not vejr_df.empty else 1260
@@ -132,4 +129,4 @@ with c2:
             st.warning(f"Tank A fuld om ca. {round(timer, 1)} timer.")
         else:
             timer = tank_mwh_nu / (abs(netto) / 1000)
-            st.success(f"Tanken tømmes. 0% om {round(timer, 1)} timer.")
+            st.success(f"Tank tømmes. 0% om {round(timer, 1)} timer.")
