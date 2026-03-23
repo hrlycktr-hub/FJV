@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# --- 1. KONFIGURATION (SCADA TAL) ---
+# --- 1. KONFIGURATION (OPDATERET TIL VEKSLERDRIFT) ---
 TANK_A_MAX_MWH = 70.0  
 ELKEDEL_MW = 2.0       
 MOTOR_VARME_MW = 1.2   
@@ -26,7 +26,6 @@ def hent_data():
     el_df = pd.DataFrame()
     vejr_df = pd.DataFrame()
     
-    # ELPRISER
     try:
         url_el = "https://api.energidataservice.dk/dataset/Elspotprices?limit=50&filter={'PriceArea':['DK2']}"
         res_el = requests.get(url_el, timeout=10).json()['records']
@@ -34,7 +33,6 @@ def hent_data():
         el_df['HourDK'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
     except: pass
 
-    # VEJR FRA YR.NO
     try:
         headers = {'User-Agent': 'SkuldelevApp/2.0 kontakt: fjv@mail.dk'}
         url_v = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}"
@@ -52,16 +50,17 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. INPUT ---
-st.header("1. Status & SCADA")
+# --- 3. INPUT (TRIMMET TIL 1300 KW VED CA. 5-6 GRADER) ---
+st.header("1. Status & SCADA (Vekslerdrift)")
 tank_pct_nu = st.slider("Aktuel Tank A (%)", 0, 100, 44)
 tank_mwh_nu = (tank_pct_nu / 100) * TANK_A_MAX_MWH
 
 col_scada1, col_scada2 = st.columns(2)
-basis_aftag = col_scada1.number_input("Basis v. 10°C (kW)", value=620)
-vejr_faktor = col_scada2.number_input("kW stigning pr. grad fald", value=48)
+# Justeret for at ramme ca. 1300 kW ved nuværende temperatur
+basis_aftag = col_scada1.number_input("Basis v. 10°C (kW)", value=850)
+vejr_faktor = col_scada2.number_input("kW stigning pr. grad fald", value=65)
 
-# --- 4. BEREGNING AF PROGNOSE ---
+# --- 4. BEREGNING ---
 if not vejr_df.empty:
     prognose = vejr_df.copy()
     beholdning = tank_mwh_nu
@@ -69,14 +68,11 @@ if not vejr_df.empty:
     aftag_log = []
 
     for i, row in prognose.iterrows():
-        # Beregn aftag baseret på dine SCADA-tal
+        # Aftag beregning
         aftag_kw = basis_aftag + ((10 - row['Temp']) * vejr_faktor)
         aftag_log.append(aftag_kw)
         
-        # Beregn hvad biokedlen gør ved den beholdning
         bio_kw = get_bio_produktion((beholdning/TANK_A_MAX_MWH)*100)
-        
-        # Opdater tanken
         netto_mwh = (bio_kw - aftag_kw) / 1000
         beholdning = max(0, min(TANK_A_MAX_MWH, beholdning + netto_mwh))
         beholdning_log.append(beholdning)
@@ -86,46 +82,44 @@ if not vejr_df.empty:
 
 # --- 5. GRAFER ---
 st.write("---")
-
-# Graf 1: Elpris
 st.subheader("Elpris (DK2)")
 if not el_df.empty:
     st.line_chart(el_df.sort_values('HourDK'), x='HourDK', y='SpotPriceDKK')
     aktuel_pris = el_df.iloc[0]['SpotPriceDKK']
 else:
-    st.warning("Venter på elpriser...")
     aktuel_pris = 250
 
-# Graf 2: Aftag pr. time (Det du bad om)
 st.write("---")
-st.subheader("Forventet Aftag pr. time (kW)")
+st.subheader("Forventet Aftag (kW) - Trimmet til Veksler")
 if not vejr_df.empty:
     st.line_chart(prognose, x='Tid', y='Aftag_kW')
-    st.caption(f"Baseret på temperaturudsigt for Skuldelev. Nu: {round(prognose['Aftag_kW'].iloc[0])} kW")
+    st.info(f"Beregnet aftag lige nu: **{round(prognose['Aftag_kW'].iloc[0])} kW**")
 
-# Graf 3: Tank-beholdning
 st.write("---")
 st.subheader("Tank-prognose (MWh)")
 if not vejr_df.empty:
     st.line_chart(prognose, x='Tid', y='Tank_MWh')
-    st.caption("Viser tankens indhold hvis kun biokedlen kører.")
 
-# --- 6. mFRR BEREGNER ---
+# --- 6. mFRR ---
 st.write("---")
 st.header("2. Aktiverings-tjek")
-aftag_nu = prognose['Aftag_kW'].iloc[0] if not vejr_df.empty else 1000
+aftag_nu_calc = prognose['Aftag_kW'].iloc[0] if not vejr_df.empty else 1300
 
-col_btn1, col_btn2 = st.columns(2)
-with col_btn1:
-    if st.button("Tjek Elkedel nu"):
+c1, c2 = st.columns(2)
+with c1:
+    if st.button("Tjek Elkedel"):
         bio = get_bio_produktion(tank_pct_nu)
-        netto = (bio + 2000) - aftag_nu
+        netto = (bio + 2000) - aftag_nu_calc
         timer = (TANK_A_MAX_MWH - tank_mwh_nu) / (max(netto, 1) / 1000)
-        st.error(f"Tank A rammer 100% om {round(timer, 1)} timer.")
+        st.error(f"Tank A fuld om {round(timer, 1)} timer.")
 
-with col_btn2:
-    if st.button("Tjek Motor nu"):
+with c2:
+    if st.button("Tjek Motor"):
         bio = get_bio_produktion(tank_pct_nu)
-        netto = (bio + 1200) - aftag_nu
-        timer = (TANK_A_MAX_MWH - tank_mwh_nu) / (max(netto, 1) / 1000)
-        st.warning(f"Tank A rammer 100% om {round(timer, 1)} timer.")
+        netto = (bio + 1200) - aftag_nu_calc
+        if netto > 0:
+            timer = (TANK_A_MAX_MWH - tank_mwh_nu) / (netto / 1000)
+            st.warning(f"Tank A fuld om {round(timer, 1)} timer.")
+        else:
+            timer = tank_mwh_nu / (abs(netto) / 1000)
+            st.success(f"Tank tømmes. 0% om {round(timer, 1)} timer.")
