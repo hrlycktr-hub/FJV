@@ -3,10 +3,8 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# --- 1. KONFIGURATION (SKULDELEV SCADA LOGIK) ---
+# --- 1. KONFIGURATION (SKULDELEV) ---
 TANK_A_MAX_MWH = 70.0  
-ELKEDEL_MW = 2.0       
-MOTOR_VARME_MW = 1.2   
 LAT, LON = 55.79, 12.02
 
 def get_bio_produktion(tank_pct):
@@ -18,7 +16,7 @@ def get_bio_produktion(tank_pct):
     return 0
 
 st.set_page_config(page_title="Skuldelev 48t Drift", page_icon="⚡", layout="wide")
-st.title("Skuldelev Drifts-Agent (48 Timer) ⚡")
+st.title("Skuldelev Drifts-Agent ⚡")
 
 # --- 2. DATA-HENTNING ---
 @st.cache_data(ttl=600)
@@ -27,6 +25,7 @@ def hent_data():
     vejr_df = pd.DataFrame()
     
     try:
+        # Henter lidt ekstra el-data for at sikre 48 timer frem
         url_el = "https://api.energidataservice.dk/dataset/Elspotprices?limit=150&filter={'PriceArea':['DK2']}"
         res_el = requests.get(url_el, timeout=10).json()['records']
         df_el = pd.DataFrame(res_el)
@@ -35,7 +34,7 @@ def hent_data():
     except: pass
 
     try:
-        headers = {'User-Agent': 'SkuldelevApp/2.0 kontakt: fjv@mail.dk'}
+        headers = {'User-Agent': 'SkuldelevApp/3.0 kontakt: fjv@mail.dk'}
         url_v = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}"
         res_v = requests.get(url_v, headers=headers, timeout=10).json()
         rows = []
@@ -53,16 +52,22 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. DASHBOARD SIDEBAR / INPUT ---
+# --- 3. SIDEBAR / INPUT ---
 with st.sidebar:
-    st.header("Aktuel Status")
+    st.header("1. Aktuel Status")
     tank_pct_nu = st.slider("Tank A Indhold (%)", 0, 100, 44)
     tank_mwh_nu = (tank_pct_nu / 100) * TANK_A_MAX_MWH
     
     st.divider()
-    st.header("SCADA Trimning")
+    st.header("2. SCADA Trimning")
     basis_ved_7gr = st.number_input("Basis v. 7°C (kW)", value=1260)
     respons_faktor = st.number_input("Respons (kW/grad)", value=45)
+    
+    st.divider()
+    st.header("3. mFRR Budpriser (kr/MWh)")
+    # Her indtaster du dine grænser
+    pris_elkedel = st.number_input("Elkedel bud (Nedregulering)", value=50, help="Ved hvilken spotpris vil du køre elkedel?")
+    pris_motor = st.number_input("Motor bud (Opregulering)", value=800, help="Ved hvilken spotpris vil du starte motoren?")
 
 # --- 4. BEREGNING ---
 if not vejr_df.empty:
@@ -70,17 +75,13 @@ if not vejr_df.empty:
     prognose['Tidspunkt'] = prognose['Tid'].dt.strftime('%d/%m %H:%M')
     
     beholdning = tank_mwh_nu
-    beholdning_log = []
-    aftag_log = []
+    beholdning_log, aftag_log = [], []
 
     for i, row in prognose.iterrows():
-        # SCADA Logik (Udetemp + Vind)
+        # SCADA Logik
         temp_tillæg = max(0, (15 - row['Temp']) * 0.8)
         vind_tillæg = 3.0 if row['Vind'] < 3 else min(10, 3 + (row['Vind'] - 3) * 0.77)
-        samlet_setpunkt_ændring = temp_tillæg + vind_tillæg
-        
-        # Aftag beregning
-        aftag_kw = basis_ved_7gr + (samlet_setpunkt_ændring - 10.3) * respons_faktor
+        aftag_kw = basis_ved_7gr + (temp_tillæg + vind_tillæg - 10.3) * respons_faktor
         aftag_log.append(aftag_kw)
         
         # Tank simulation
@@ -92,52 +93,54 @@ if not vejr_df.empty:
     prognose['Tank_MWh'] = beholdning_log
     prognose['Aftag_kW'] = aftag_log
 
-# --- 5. VISNING AF GRAFER ---
-col_left, col_right = st.columns(2)
-
-with col_left:
-    st.subheader("Forventet Aftag (kW)")
-    st.line_chart(prognose.set_index('Tidspunkt')['Aftag_kW'], color="#ff4b4b")
-    st.info(f"Aftag nu: **{round(prognose['Aftag_kW'].iloc[0])} kW**")
-
-with col_right:
-    st.subheader("Tank-beholdning (MWh)")
-    st.line_chart(prognose.set_index('Tidspunkt')['Tank_MWh'], color="#29b5e8")
-    
-    # Hurtig status under grafen
-    slut_mwh = beholdning_log[-1]
-    tendens = "STIGENDE" if slut_mwh > tank_mwh_nu else "FALDENDE"
-    st.write(f"Tendens over 48 timer: **{tendens}** (Slut: {round(slut_mwh,1)} MWh)")
-
-st.divider()
-
-st.subheader("Elpris (DK2) - 48 timer frem")
+# --- 5. ØKONOMISK ANALYSE ---
+st.header("Økonomisk Overblik (mFRR Strategi)")
 if not el_df.empty:
     nu_tid = datetime.now()
-    el_plot = el_df[el_df['Tid'] >= nu_tid - timedelta(hours=1)].head(48).copy()
-    el_plot['Tidspunkt'] = el_plot['Tid'].dt.strftime('%d/%m %H:%M')
-    st.line_chart(el_plot.set_index('Tidspunkt')['SpotPriceDKK'], color="#2ecc71")
-else:
-    st.warning("Venter på pris-opdatering fra Energi Data Service...")
+    el_48 = el_df[el_df['Tid'] >= nu_tid - timedelta(hours=1)].head(48).copy()
+    
+    # Tæl gunstige timer
+    timer_elkedel = len(el_48[el_48['SpotPriceDKK'] <= pris_elkedel])
+    timer_motor = len(el_48[el_48['SpotPriceDKK'] >= pris_motor])
+    
+    col_eco1, col_eco2, col_eco3 = st.columns(3)
+    col_eco1.metric("Elkedel-vindue (48t)", f"{timer_elkedel} timer", f"Pris <= {pris_elkedel} kr")
+    col_eco2.metric("Motor-vindue (48t)", f"{timer_motor} timer", f"Pris >= {pris_motor} kr")
+    col_eco3.metric("Spotpris lige nu", f"{round(el_48['SpotPriceDKK'].iloc[0])} kr")
 
-# --- 6. mFRR AKTIVERINGSTJEK ---
+# --- 6. GRAFER ---
 st.divider()
-st.header("mFRR Aktiverings-tjek")
-aftag_nu_calc = prognose['Aftag_kW'].iloc[0] if not vejr_df.empty else 1260
+c_left, c_right = st.columns(2)
+with c_left:
+    st.subheader("Forventet Aftag (kW)")
+    st.line_chart(prognose.set_index('Tidspunkt')['Aftag_kW'], color="#ff4b4b")
+with c_right:
+    st.subheader("Tank-prognose (MWh)")
+    st.line_chart(prognose.set_index('Tidspunkt')['Tank_MWh'], color="#29b5e8")
 
+st.subheader("Elpriser (kr/MWh) med bud-grænser")
+if not el_df.empty:
+    el_48['Klokkeslæt'] = el_48['Tid'].dt.strftime('%d/%m %H:%M')
+    # Vi tilføjer bud-linjerne til grafen så man kan se dem visuelt
+    el_48['Elkedel bud'] = pris_elkedel
+    el_48['Motor bud'] = pris_motor
+    st.line_chart(el_48.set_index('Klokkeslæt')[['SpotPriceDKK', 'Elkedel bud', 'Motor bud']], color=["#2ecc71", "#ff9f43", "#ee5253"])
+
+# --- 7. mFRR AKTIVERINGSTJEK ---
+st.divider()
+st.header("Hurtigtjek: Hvor længe kan jeg køre?")
+aftag_nu_calc = prognose['Aftag_kW'].iloc[0] if not vejr_df.empty else 1260
 c1, c2, c3 = st.columns(3)
 with c1:
-    if st.button("Kør Elkedel (2MW)"):
+    if st.button("Tjek Elkedel (Nedreg)"):
         netto = (get_bio_produktion(tank_pct_nu) + 2000) - aftag_nu_calc
-        timer = (TANK_A_MAX_MWH - tank_mwh_nu) / (max(netto, 1) / 1000)
-        st.error(f"Tank fuld om: {round(timer, 1)} timer")
+        st.error(f"Tank fuld om {round((TANK_A_MAX_MWH-tank_mwh_nu)/(max(netto,1)/1000), 1)} t")
 with c2:
-    if st.button("Kør Motor (1.2MW)"):
+    if st.button("Tjek Motor (Opreg)"):
         netto = (get_bio_produktion(tank_pct_nu) + 1200) - aftag_nu_calc
-        timer = (TANK_A_MAX_MWH - tank_mwh_nu) / (max(netto, 1) / 1000)
-        st.warning(f"Tank fuld om: {round(timer, 1)} timer")
+        st.warning(f"Tank fuld om {round((TANK_A_MAX_MWH-tank_mwh_nu)/(max(netto,1)/1000), 1)} t")
 with c3:
-    if st.button("Kun Biokedel"):
+    if st.button("Tjek Kun Bio"):
         netto = get_bio_produktion(tank_pct_nu) - aftag_nu_calc
-        timer = (tank_mwh_nu if netto < 0 else TANK_A_MAX_MWH - tank_mwh_nu) / (abs(netto) / 1000)
-        st.success(f"Tank {'tom' if netto < 0 else 'fuld'} om: {round(timer, 1)} timer")
+        tid = (tank_mwh_nu if netto < 0 else TANK_A_MAX_MWH - tank_mwh_nu) / (abs(netto) / 1000)
+        st.success(f"Fuld/tom om {round(tid, 1)} t")
