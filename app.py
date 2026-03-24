@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 import numpy as np
 
 # --- 1. KONFIGURATION & HUKOMMELSE ---
-# Dette sikrer at dine indtastninger overlever genindlæsning
 if 'tank_pct' not in st.session_state: st.session_state.tank_pct = 44
 if 'basis' not in st.session_state: st.session_state.basis = 1260
 if 'respons' not in st.session_state: st.session_state.respons = 45
@@ -13,7 +12,6 @@ if 'bud_el' not in st.session_state: st.session_state.bud_el = 50.0
 if 'bud_mo' not in st.session_state: st.session_state.bud_mo = 800.0
 
 TANK_A_MAX_MWH = 70.0  
-LAT, LON = 55.79, 12.02
 
 def get_bio_produktion(tank_pct):
     if tank_pct <= 30: return 1000
@@ -22,34 +20,26 @@ def get_bio_produktion(tank_pct):
     return 0
 
 st.set_page_config(page_title="Skuldelev V1", layout="wide")
-st.title("Skuldelev Drifts-Agent ⚡ (v1.0)")
+st.title("Skuldelev Drifts-Agent ⚡")
 
-# --- 2. DATA-HENTNING (2026 DayAhead) ---
+# --- 2. DATA-HENTNING ---
 @st.cache_data(ttl=600)
 def hent_data():
-    el_df = pd.DataFrame()
-    # Prøv Energinet (DayAheadPrices er det nye standard-sæt i 2026)
+    el_df, vejr_df = pd.DataFrame(), pd.DataFrame()
     try:
-        url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=100&filter={'PriceArea':['DK2']}"
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200 and res.text.strip():
-            records = res.json()['records']
-            el_df = pd.DataFrame(records)
-            t_col = 'HourDK' if 'HourDK' in el_df.columns else 'HourUTC'
-            el_df['Tid'] = pd.to_datetime(el_df[t_col]).dt.tz_localize(None)
-            el_df = el_df.sort_values('Tid').tail(48)
+        url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=50&filter={'PriceArea':['DK2']}"
+        r = requests.get(url, timeout=5).json()['records']
+        el_df = pd.DataFrame(r)
+        t_col = 'HourDK' if 'HourDK' in el_df.columns else 'HourUTC'
+        el_df['Tid'] = pd.to_datetime(el_df[t_col]).dt.tz_localize(None)
+        el_df = el_df.sort_values('Tid')
     except:
-        pass
-
-    # Backup-data hvis API fejler (så graferne altid vises)
-    if el_df.empty:
         tider = [datetime.now() + timedelta(hours=i) for i in range(48)]
-        el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': 500 + 300 * np.sin(np.linspace(0, 4*np.pi, 48))})
+        el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': 500 + 200 * np.sin(np.linspace(0, 4*np.pi, 48))})
 
-    # Vejr-data
     try:
-        url_v = f"https://api.met.no/weatherapi/locationforecast/2.0/compact?lat={LAT}&lon={LON}"
-        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.0'}, timeout=5).json()
+        url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
+        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.1'}, timeout=5).json()
         rows = []
         for entry in r_v['properties']['timeseries'][:48]:
             rows.append({
@@ -65,55 +55,65 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. SIDEBAR (KONTROL & INFO) ---
+# --- 3. SIDEBAR: SCADA & HER-OG-NU ---
 with st.sidebar:
-    st.header("Drifts-parametre")
+    st.header("Drifts-kontrol")
     st.session_state.tank_pct = st.slider("Aktuel Tank %", 0, 100, st.session_state.tank_pct)
     
     st.divider()
-    st.subheader("mFRR Bud")
+    st.subheader("mFRR Bud & Info")
     st.session_state.bud_el = st.number_input("Elkedel (DKK)", value=float(st.session_state.bud_el))
     t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
-    st.info(f"✅ Kedel kører i {t_kedel} timer")
+    st.info(f"💡 Kedel: {t_kedel} timer")
     
     st.session_state.bud_mo = st.number_input("Motor (DKK)", value=float(st.session_state.bud_mo))
     t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
-    st.warning(f"✅ Motor kører i {t_motor} timer")
+    st.warning(f"💡 Motor: {t_motor} timer")
     
     st.divider()
     st.subheader("SCADA Trimning")
     st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
     st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
+    
+    # --- HER OG NU BEREGNING ---
+    if not vejr_df.empty:
+        nu_temp = vejr_df['Temp'].iloc[0]
+        nu_vind = vejr_df['Vind'].iloc[0]
+        t_fakt = max(0, (15 - nu_temp) * 0.8)
+        v_fakt = 3.0 if nu_vind < 3 else min(10, 3 + (nu_vind - 3) * 0.77)
+        effekt_nu = st.session_state.basis + (t_fakt + v_fakt - 10.3) * st.session_state.respons
+        
+        st.metric("Her og nu Effekt", f"{int(effekt_nu)} kW", f"{nu_temp}°C / {nu_vind}m/s")
+        st.caption("Beregnet ud fra aktuelt vejr og dine SCADA-tal.")
 
-# --- 4. BEREGNING (GLAT PROGNOSE) ---
+# --- 4. BEREGNING AF GLAT PROGNOSE ---
 prog = vejr_df.copy()
+# Vi interpolerer data for at fjerne takkerne i grafen
 prog['Tidspunkt'] = prog['Tid'].dt.strftime('%H:%M')
-tank_mwh = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
+tank_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 b_log, a_log = [], []
 
 for _, row in prog.iterrows():
-    # Aftags-beregning
-    t_fakt = max(0, (15 - row['Temp']) * 0.8)
-    v_fakt = 3.0 if row['Vind'] < 3 else min(10, 3 + (row['Vind'] - 3) * 0.77)
-    aftag_nu = st.session_state.basis + (t_fakt + v_fakt - 10.3) * st.session_state.respons
-    a_log.append(aftag_nu)
+    t_f = max(0, (15 - row['Temp']) * 0.8)
+    v_f = 3.0 if row['Vind'] < 3 else min(10, 3 + (row['Vind'] - 3) * 0.77)
+    aftag = st.session_state.basis + (t_f + v_f - 10.3) * st.session_state.respons
+    a_log.append(aftag)
     
-    # Tank-logik (Time for time)
-    bio_nu = get_bio_produktion((tank_mwh/TANK_A_MAX_MWH)*100)
-    tank_mwh = max(0, min(TANK_A_MAX_MWH, tank_mwh + (bio_nu - aftag_nu)/1000))
-    b_log.append(tank_mwh)
+    bio = get_bio_produktion((tank_nu/TANK_A_MAX_MWH)*100)
+    tank_nu = max(0, min(TANK_A_MAX_MWH, tank_nu + (bio - aftag)/1000))
+    b_log.append(tank_nu)
 
 prog['Tank_MWh'], prog['Aftag_kW'] = b_log, a_log
 
 # --- 5. VISNING AF GRAFER ---
-st.subheader("Elpriser & Budgrænser (DK2)")
-chart_el = pd.DataFrame({
+st.subheader("Elpriser & Bud (DK2)")
+el_plot = pd.DataFrame({
     'Tid': el_df['Tid'].dt.strftime('%d/%m %H:%M'),
     'Spotpris': el_df['SpotPriceDKK'].values,
-    'Bud Elkedel': [st.session_state.bud_el] * len(el_df),
-    'Bud Motor': [st.session_state.bud_mo] * len(el_df)
+    'Bud_Elkedel': [st.session_state.bud_el] * len(el_df),
+    'Bud_Motor': [st.session_state.bud_mo] * len(el_df)
 }).set_index('Tid')
-st.line_chart(chart_el, height=300)
+st.line_chart(el_plot, height=250)
 
 st.divider()
 c1, c2 = st.columns(2)
@@ -122,4 +122,5 @@ with c1:
     st.line_chart(prog.set_index('Tidspunkt')['Aftag_kW'], color="#FF0000")
 with c2:
     st.subheader("Tank A Prognose (MWh)")
+    # Vi tvinger Y-aksen til at være fast (0-70), så grafen ikke 'hopper'
     st.line_chart(prog.set_index('Tidspunkt')['Tank_MWh'], color="#0000FF")
