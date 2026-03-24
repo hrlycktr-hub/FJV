@@ -41,7 +41,7 @@ def hent_data():
 
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.1'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.2'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -57,28 +57,37 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. SIDEBAR ---
+# --- 3. SIDEBAR: SCADA TRIMNING & INFO ---
 with st.sidebar:
-    st.header("SCADA Trim")
+    st.header("SCADA Trimning")
+    
+    # Her og nu effekt beregning (Kalibreret med offsets)
     nu_t = vejr_df['Temp'].iloc[0] + st.session_state.temp_off
     nu_v = max(0, vejr_df['Vind'].iloc[0] + st.session_state.vind_off)
-    tf = max(0, (15 - nu_t) * 0.8); vf = 3.0 if nu_v < 3 else min(10, 3 + (nu_v - 3) * 0.77)
+    tf = max(0, (15 - nu_t) * 0.8)
+    vf = 3.0 if nu_v < 3 else min(10, 3 + (nu_v - 3) * 0.77)
     effekt_nu = st.session_state.basis + (tf + vf - 10.3) * st.session_state.respons
-    st.metric("Effekt NU", f"{int(effekt_nu)} kW")
+    
+    st.metric("Beregnet Effekt NU", f"{int(effekt_nu)} kW")
+    st.caption(f"Trimmet vejr: {round(nu_t,1)}°C / {round(nu_v,1)} m/s")
+    
     st.divider()
+    st.subheader("Basis & Respons")
     st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
     st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
+    
     st.divider()
-    st.session_state.bud_el = st.number_input("Bud Elkedel", value=float(st.session_state.bud_el))
-    st.info(f"💡 Kedel: {len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])} timer")
-    st.session_state.bud_mo = st.number_input("Bud Motor", value=float(st.session_state.bud_mo))
-    st.warning(f"💡 Motor: {len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])} timer")
+    st.subheader("Vejr-Offset (Kalibrering)")
+    st.session_state.temp_off = st.slider("Temp Offset (°C)", -5.0, 5.0, st.session_state.temp_off)
+    st.session_state.vind_off = st.slider("Vind Offset (m/s)", -10.0, 10.0, st.session_state.vind_off)
+    
     st.divider()
-    st.session_state.temp_off = st.slider("Temp Offset", -5.0, 5.0, st.session_state.temp_off)
-    st.session_state.vind_off = st.slider("Vind Offset", -10.0, 10.0, st.session_state.vind_off)
+    st.subheader("Tank & mFRR")
     st.session_state.tank_pct = st.slider("Aktuel Tank %", 0, 100, st.session_state.tank_pct)
+    st.session_state.bud_el = st.number_input("Bud Elkedel", value=float(st.session_state.bud_el))
+    st.session_state.bud_mo = st.number_input("Bud Motor", value=float(st.session_state.bud_mo))
 
-# --- 4. DRIFTS-BEREGNING ---
+# --- 4. DRIFTS-BEREGNING (MED INTERPOLERING) ---
 p_data = []
 tank_v = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 for i in range(len(vejr_df)):
@@ -87,27 +96,22 @@ for i in range(len(vejr_df)):
     vc = max(0, r['Vind'] + st.session_state.vind_off)
     aftag = st.session_state.basis + (max(0,(15-tc)*0.8) + (3.0 if vc<3 else min(10,3+(vc-3)*0.77)) - 10.3) * st.session_state.respons
     tank_v = max(0, min(TANK_A_MAX_MWH, tank_v + (get_bio_produktion((tank_v/70)*100) - aftag)/1000))
-    p_data.append({'Tid': r['Tid'], 'Aftag': aftag, 'Tank': tank_v})
-df = pd.DataFrame(p_data)
+    p_data.append({'Tid': i, 'Aftag': aftag, 'Tank': tank_v})
+df_prog = pd.DataFrame(p_data)
 
-# --- 5. VISNING MED SCIPY UDGLATNING ---
+# --- 5. GRAFER (SCIPY SPLINES FOR OVERBLIK) ---
 def smooth_chart(df, y_col, color, title, y_range=None):
-    x = np.arange(len(df))
-    x_new = np.linspace(0, len(df)-1, 200) # Gør 48 punkter til 200 for blødhed
+    x = df['Tid'].values
+    x_new = np.linspace(x.min(), x.max(), 300)
     spline = make_interp_spline(x, df[y_col], k=3)
     y_smooth = spline(x_new)
     
-    # Lav en dataframe til grafen
-    smooth_df = pd.DataFrame({
-        'Time': x_new,
-        y_col: y_smooth
-    }).set_index('Time')
-    
+    chart_df = pd.DataFrame({'Time': x_new, y_col: y_smooth}).set_index('Time')
     st.subheader(title)
-    st.line_chart(smooth_df, color=color)
+    st.line_chart(chart_df, color=color)
 
-# Elpris (Trappetrin er bedst her)
-st.subheader("Elpriser & Bud")
+# Elpris (24-timers tekst)
+st.subheader("Elpriser & Bud (DK2)")
 el_plot = pd.DataFrame({
     'Tid': el_df['Tid'].dt.strftime('%H:00'),
     'Spotpris': el_df['SpotPriceDKK'].values,
@@ -119,6 +123,6 @@ st.line_chart(el_plot)
 st.divider()
 c1, c2 = st.columns(2)
 with c1:
-    smooth_chart(df, 'Aftag', '#FF4B4B', 'Aftag (kW)')
+    smooth_chart(df_prog, 'Aftag', '#FF4B4B', 'Aftag (kW) - Udglattet')
 with c2:
-    smooth_chart(df, 'Tank', '#0072B2', 'Tank A Prognose (MWh)')
+    smooth_chart(df_prog, 'Tank', '#0072B2', 'Tank A Prognose (MWh)', y_range=[0, 70])
