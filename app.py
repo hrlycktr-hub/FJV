@@ -5,23 +5,19 @@ import numpy as np
 from datetime import datetime, timedelta
 from scipy.interpolate import make_interp_spline
 
-# --- 1. SETUP & INITIALISERING ---
-def init_state(key, value):
-    if key not in st.session_state:
-        st.session_state[key] = value
+# --- 1. SESSION STATE INITIALISERING (Kører kun én gang pr. browser-session) ---
+if 'init_done' not in st.session_state:
+    st.session_state.tank_pct = 50
+    st.session_state.basis = 1260
+    st.session_state.respons = 45
+    st.session_state.bud_el = 50.0
+    st.session_state.bud_mo = 800.0
+    st.session_state.temp_off = 0.0
+    st.session_state.vind_off = 0.0
+    st.session_state.sidste_el_data = pd.DataFrame()
+    st.session_state.opdateret_tid = "Afventer..."
+    st.session_state.init_done = True
 
-init_state('tank_pct', 50) # Sat til 50 som standard nu
-init_state('basis', 1260)
-init_state('respons', 45)
-init_state('bud_el', 50.0)
-init_state('bud_mo', 800.0)
-init_state('temp_off', 0.0)
-init_state('vind_off', 0.0)
-init_state('sidste_el_data', pd.DataFrame())
-init_state('opdateret_tid', "Afventer synkronisering...")
-
-# KORRIGERET TANK-LOGIK:
-# Hvis 50% = 25,2 MWh, så er den fulde kapacitet (100%) = 50,4 MWh
 TANK_A_MAX_MWH = 50.4  
 
 def get_bio_produktion(tank_pct):
@@ -30,36 +26,28 @@ def get_bio_produktion(tank_pct):
     elif tank_pct <= 90: return 600
     return 0
 
-st.set_page_config(page_title="Skuldelev V1 - Korrigeret", layout="wide")
+st.set_page_config(page_title="Skuldelev V1 - Stabil Drift", layout="wide")
 
-# --- 2. DATA-HENTNING ---
+# --- 2. DATA-HENTNING (Uden at røre ved session_state direkte) ---
 @st.cache_data(ttl=300)
-def hent_data():
-    el_df = pd.DataFrame()
-    opdateret = st.session_state.opdateret_tid
+def hent_ekstern_data():
+    el_out = pd.DataFrame()
+    vejr_out = pd.DataFrame()
+    update_str = ""
+    
     try:
         url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=48&filter={'PriceArea':['DK2']}"
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            data = r.json()['records']
-            if data:
-                el_df = pd.DataFrame(data)
-                el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
-                el_df = el_df.sort_values('Tid').reset_index(drop=True)
-                st.session_state.sidste_el_data = el_df
-                st.session_state.opdateret_tid = datetime.now().strftime("%H:%M:%S (%d/%m)")
-                opdateret = st.session_state.opdateret_tid
+        r = requests.get(url, timeout=5).json()['records']
+        el_out = pd.DataFrame(r)
+        el_out['Tid'] = pd.to_datetime(el_out['HourDK']).dt.tz_localize(None)
+        el_out = el_out.sort_values('Tid').reset_index(drop=True)
+        update_str = datetime.now().strftime("%H:%M:%S")
     except:
-        el_df = st.session_state.sidste_el_data
-    
-    if el_df.empty:
-        tider = [datetime.now().replace(minute=0, second=0) + timedelta(hours=i) for i in range(48)]
-        el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': [500.0]*48})
-        opdateret = "Bruger backup-data"
+        pass
 
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.8'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/3.0'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -67,15 +55,50 @@ def hent_data():
                 'Temp': e['data']['instant']['details']['air_temperature'],
                 'Vind': e['data']['instant']['details']['wind_speed']
             })
-        vejr_df = pd.DataFrame(rows).sort_values('Tid').reset_index(drop=True)
+        vejr_out = pd.DataFrame(rows).sort_values('Tid').reset_index(drop=True)
     except:
-        vejr_df = pd.DataFrame({'Tid': el_df['Tid'], 'Temp': [7.0]*48, 'Vind': [5.0]*48})
+        pass
+        
+    return el_out, vejr_out, update_str
+
+# Hent data
+raw_el, raw_vejr, update_tid = hent_ekstern_data()
+
+# Backup logik hvis API svigter
+if not raw_el.empty:
+    st.session_state.sidste_el_data = raw_el
+    st.session_state.opdateret_tid = update_tid
+
+el_df = st.session_state.sidste_el_data
+if el_df.empty:
+    el_df = pd.DataFrame({'Tid': [datetime.now()]*48, 'SpotPriceDKK': [500.0]*48})
+
+vejr_df = raw_vejr
+if vejr_df.empty:
+    vejr_df = pd.DataFrame({'Tid': el_df['Tid'], 'Temp': [7.0]*48, 'Vind': [5.0]*48})
+
+# --- 3. SIDEBAR (Med faste Keys) ---
+with st.sidebar:
+    st.header("⚙️ Kontrolpanel")
     
-    return el_df, vejr_df, opdateret
+    with st.container(border=True):
+        st.subheader("📊 mFRR Bud")
+        st.number_input("Bud Elkedel", key='bud_el')
+        st.number_input("Bud Motor", key='bud_mo')
+    
+    with st.container(border=True):
+        st.subheader("🔧 SCADA Trimning")
+        st.number_input("Basis (kW)", key='basis')
+        st.number_input("Respons", key='respons')
+        st.divider()
+        st.slider("Temp Offset", -5.0, 5.0, key='temp_off')
+        st.slider("Vind Offset", -10.0, 10.0, key='vind_off')
 
-el_df, vejr_df, sidste_update = hent_data()
+    with st.container(border=True):
+        st.subheader("🔋 Tank Status")
+        st.slider("Aktuel %", 0, 100, key='tank_pct')
 
-# --- 3. BEREGNINGER ---
+# --- 4. BEREGNINGER (Bruger værdier direkte fra session_state keys) ---
 nu_t = vejr_df['Temp'].iloc[0] + st.session_state.temp_off
 nu_v = max(0, vejr_df['Vind'].iloc[0] + st.session_state.vind_off)
 tf = max(0, (15 - nu_t) * 0.8)
@@ -84,13 +107,11 @@ effekt_nu = st.session_state.basis + (tf + vf - 10.3) * st.session_state.respons
 
 t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
 t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
-
-# NY BEREGNING: 50% af 50.4 MWh = 25.2 MWh
 tank_mwh_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 
-# --- 4. DASHBOARD ---
+# --- 5. DASHBOARD ---
 st.title("Skuldelev Drifts-Agent ⚡")
-st.caption(f"Sidste synkronisering: {sidste_update}")
+st.caption(f"Data sidst hentet: {st.session_state.opdateret_tid}")
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Aktuel Effekt", f"{int(effekt_nu)} kW")
@@ -100,37 +121,19 @@ k4.metric("mFRR Timer", f"K:{t_kedel}t / M:{t_motor}t")
 
 st.divider()
 
-# --- 5. SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ Kontrolpanel")
-    with st.container(border=True):
-        st.subheader("📊 mFRR Bud")
-        st.number_input("Bud Elkedel", key='bud_el')
-        st.number_input("Bud Motor", key='bud_mo')
-    with st.container(border=True):
-        st.subheader("🔧 SCADA Trimning")
-        st.number_input("Basis (kW)", key='basis')
-        st.number_input("Respons", key='respons')
-        st.divider()
-        st.slider("Temp Offset", -5.0, 5.0, key='temp_off')
-        st.slider("Vind Offset", -10.0, 10.0, key='vind_off')
-    with st.container(border=True):
-        st.subheader("🔋 Tank Niveau")
-        st.slider("Aktuel %", 0, 100, key='tank_pct')
-
-# --- 6. PROGNOSE & GRAFER ---
+# Prognose loop
 p_data = []
-temp_tank = tank_mwh_nu
+cur_tank = tank_mwh_nu
 for i in range(len(vejr_df)):
     r = vejr_df.iloc[i]
     tc = r['Temp'] + st.session_state.temp_off
     vc = max(0, r['Vind'] + st.session_state.vind_off)
     aftag = st.session_state.basis + (max(0,(15-tc)*0.8) + (3.0 if vc<3 else min(10,3+(vc-3)*0.77)) - 10.3) * st.session_state.respons
-    # Beregn ændring i MWh baseret på ny total kapacitet
-    temp_tank = max(0, min(TANK_A_MAX_MWH, temp_tank + (get_bio_produktion((temp_tank/TANK_A_MAX_MWH)*100) - aftag)/1000))
-    p_data.append({'Tid': i, 'Aftag': aftag, 'Tank': temp_tank})
+    cur_tank = max(0, min(TANK_A_MAX_MWH, cur_tank + (get_bio_produktion((cur_tank/TANK_A_MAX_MWH)*100) - aftag)/1000))
+    p_data.append({'Tid': i, 'Aftag': aftag, 'Tank': cur_tank})
 df_prog = pd.DataFrame(p_data)
 
+# Grafer
 def smooth_chart(df, y_col, color, title):
     x = df['Tid'].values
     x_new = np.linspace(x.min(), x.max(), 300)
@@ -139,11 +142,11 @@ def smooth_chart(df, y_col, color, title):
     st.subheader(title)
     st.line_chart(pd.DataFrame({y_col: y_smooth}), color=color)
 
-st.subheader("Pris-overblik")
+st.subheader("Spotpriser (DK2)")
 st.line_chart(pd.DataFrame({
     'Spot': el_df['SpotPriceDKK'].values,
-    'Kedel': [st.session_state.bud_el]*48,
-    'Motor': [st.session_state.bud_mo]*48
+    'Bud Elkedel': [st.session_state.bud_el]*48,
+    'Bud Motor': [st.session_state.bud_mo]*48
 }))
 
 c1, c2 = st.columns(2)
