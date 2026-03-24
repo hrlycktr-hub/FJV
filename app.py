@@ -4,12 +4,14 @@ import requests
 from datetime import datetime, timedelta
 import numpy as np
 
-# --- 1. KONFIGURATION & HUKOMMELSE ---
-if 'tank_pct' not in st.session_state: st.session_state.tank_pct = 44
-if 'basis' not in st.session_state: st.session_state.basis = 1260
-if 'respons' not in st.session_state: st.session_state.respons = 45
-if 'bud_el' not in st.session_state: st.session_state.bud_el = 50.0
-if 'bud_mo' not in st.session_state: st.session_state.bud_mo = 800.0
+# --- 1. KONFIGURATION & SESSION STATE ---
+defaults = {
+    'tank_pct': 44, 'basis': 1260, 'respons': 45, 
+    'bud_el': 50.0, 'bud_mo': 800.0,
+    'temp_off': 0.0, 'vind_off': 0.0  # Nye kalibrerings-værdier
+}
+for key, val in defaults.items():
+    if key not in st.session_state: st.session_state[key] = val
 
 TANK_A_MAX_MWH = 70.0  
 
@@ -39,7 +41,7 @@ def hent_data():
 
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.1'}, timeout=5).json()
+        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.2'}, timeout=5).json()
         rows = []
         for entry in r_v['properties']['timeseries'][:48]:
             rows.append({
@@ -55,42 +57,43 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. SIDEBAR: SCADA & HER-OG-NU ---
+# --- 3. SIDEBAR: SCADA & VEJR-KALIBRERING ---
 with st.sidebar:
     st.header("Drifts-kontrol")
     st.session_state.tank_pct = st.slider("Aktuel Tank %", 0, 100, st.session_state.tank_pct)
     
     st.divider()
-    st.subheader("mFRR Bud & Info")
-    st.session_state.bud_el = st.number_input("Elkedel (DKK)", value=float(st.session_state.bud_el))
-    t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
-    st.info(f"💡 Kedel: {t_kedel} timer")
-    
-    st.session_state.bud_mo = st.number_input("Motor (DKK)", value=float(st.session_state.bud_mo))
-    t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
-    st.warning(f"💡 Motor: {t_motor} timer")
+    st.subheader("Vejr-kalibrering")
+    st.caption("Justér så det passer med din lokale vejrstation")
+    st.session_state.temp_off = st.slider("Temp Offset (°C)", -5.0, 5.0, st.session_state.temp_off, step=0.1)
+    st.session_state.vind_off = st.slider("Vind Offset (m/s)", -10.0, 10.0, st.session_state.vind_off, step=0.5)
     
     st.divider()
     st.subheader("SCADA Trimning")
     st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
     st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
     
-    # --- HER OG NU BEREGNING ---
+    # --- HER OG NU BEREGNING MED KALIBRERING ---
     if not vejr_df.empty:
-        nu_temp = vejr_df['Temp'].iloc[0]
-        nu_vind = vejr_df['Vind'].iloc[0]
-        t_fakt = max(0, (15 - nu_temp) * 0.8)
-        v_fakt = 3.0 if nu_vind < 3 else min(10, 3 + (nu_vind - 3) * 0.77)
+        # Påfør offset på her-og-nu data
+        cal_temp = vejr_df['Temp'].iloc[0] + st.session_state.temp_off
+        cal_vind = max(0, vejr_df['Vind'].iloc[0] + st.session_state.vind_off)
+        
+        t_fakt = max(0, (15 - cal_temp) * 0.8)
+        v_fakt = 3.0 if cal_vind < 3 else min(10, 3 + (cal_vind - 3) * 0.77)
         effekt_nu = st.session_state.basis + (t_fakt + v_fakt - 10.3) * st.session_state.respons
         
-        st.metric("Her og nu Effekt", f"{int(effekt_nu)} kW", f"{nu_temp}°C / {nu_vind}m/s")
-        st.caption("Beregnet ud fra aktuelt vejr og dine SCADA-tal.")
+        st.metric("Her og nu Effekt", f"{int(effekt_nu)} kW")
+        st.write(f"Brugt vejr: {round(cal_temp,1)}°C / {round(cal_vind,1)}m/s")
 
-# --- 4. BEREGNING AF GLAT PROGNOSE ---
+# --- 4. BEREGNING AF PROGNOSE (GLATTE KURVER) ---
 prog = vejr_df.copy()
-# Vi interpolerer data for at fjerne takkerne i grafen
+# Vi påfører også offset på prognosen for sammenhæng
+prog['Temp'] = prog['Temp'] + st.session_state.temp_off
+prog['Vind'] = (prog['Vind'] + st.session_state.vind_off).clip(lower=0)
 prog['Tidspunkt'] = prog['Tid'].dt.strftime('%H:%M')
-tank_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
+
+tank_mwh = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 b_log, a_log = [], []
 
 for _, row in prog.iterrows():
@@ -98,14 +101,13 @@ for _, row in prog.iterrows():
     v_f = 3.0 if row['Vind'] < 3 else min(10, 3 + (row['Vind'] - 3) * 0.77)
     aftag = st.session_state.basis + (t_f + v_f - 10.3) * st.session_state.respons
     a_log.append(aftag)
-    
-    bio = get_bio_produktion((tank_nu/TANK_A_MAX_MWH)*100)
-    tank_nu = max(0, min(TANK_A_MAX_MWH, tank_nu + (bio - aftag)/1000))
-    b_log.append(tank_nu)
+    bio = get_bio_produktion((tank_mwh/TANK_A_MAX_MWH)*100)
+    tank_mwh = max(0, min(TANK_A_MAX_MWH, tank_mwh + (bio - aftag)/1000))
+    b_log.append(tank_mwh)
 
 prog['Tank_MWh'], prog['Aftag_kW'] = b_log, a_log
 
-# --- 5. VISNING AF GRAFER ---
+# --- 5. VISNING ---
 st.subheader("Elpriser & Bud (DK2)")
 el_plot = pd.DataFrame({
     'Tid': el_df['Tid'].dt.strftime('%d/%m %H:%M'),
@@ -122,5 +124,4 @@ with c1:
     st.line_chart(prog.set_index('Tidspunkt')['Aftag_kW'], color="#FF0000")
 with c2:
     st.subheader("Tank A Prognose (MWh)")
-    # Vi tvinger Y-aksen til at være fast (0-70), så grafen ikke 'hopper'
     st.line_chart(prog.set_index('Tidspunkt')['Tank_MWh'], color="#0000FF")
