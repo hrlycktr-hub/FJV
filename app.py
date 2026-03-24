@@ -40,7 +40,7 @@ def hent_data():
 
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.4'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.5'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -70,35 +70,40 @@ tank_mwh_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 # --- 4. HOVEDSKÆRM: DASHBOARD ---
 st.title("Skuldelev Drifts-Agent ⚡")
 
-# Infobokse i toppen
+# Status-bokse (KPI)
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Aktuel Effekt", f"{int(effekt_nu)} kW")
 k2.metric("Vejr (Trimmet)", f"{round(nu_t,1)} °C", f"{round(nu_v,1)} m/s")
 k3.metric("Tank Status", f"{st.session_state.tank_pct} %", f"{round(tank_mwh_nu,1)} MWh")
-k4.metric("mFRR Aktivering", f"K:{t_kedel}t / M:{t_motor}t")
+k4.metric("mFRR Timer", f"K:{t_kedel}t / M:{t_motor}t")
 
 st.divider()
 
-# --- 5. SIDEBAR: MENU ---
+# --- 5. SIDEBAR: FASTE BOKSE ---
 with st.sidebar:
-    st.header("Indstillinger")
-    mode = st.selectbox("Menu:", ["SCADA Trimning", "El-marked & Bud"])
-    
-    if mode == "SCADA Trimning":
-        st.subheader("Parametre")
-        st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
-        st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
-        st.divider()
-        st.subheader("Offsets")
-        st.session_state.temp_off = st.slider("Temp Offset", -5.0, 5.0, st.session_state.temp_off)
-        st.session_state.vind_off = st.slider("Vind Offset", -10.0, 10.0, st.session_state.vind_off)
-    else:
-        st.subheader("Budgivning")
+    # BOKS 1: mFRR & BUD
+    with st.container(border=True):
+        st.subheader("📊 mFRR Budgivning")
         st.session_state.bud_el = st.number_input("Bud Elkedel", value=float(st.session_state.bud_el))
         st.session_state.bud_mo = st.number_input("Bud Motor", value=float(st.session_state.bud_mo))
     
-    st.divider()
-    st.session_state.tank_pct = st.slider("Manuel Tank %", 0, 100, st.session_state.tank_pct)
+    st.write("") # Mellemrum
+
+    # BOKS 2: SCADA TRIMNING
+    with st.container(border=True):
+        st.subheader("🔧 SCADA Trimning")
+        st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
+        st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
+        st.divider()
+        st.session_state.temp_off = st.slider("Temp Offset", -5.0, 5.0, st.session_state.temp_off)
+        st.session_state.vind_off = st.slider("Vind Offset", -10.0, 10.0, st.session_state.vind_off)
+
+    st.write("") # Mellemrum
+
+    # BOKS 3: TANK
+    with st.container(border=True):
+        st.subheader("🔋 Tank Niveau")
+        st.session_state.tank_pct = st.slider("Aktuel %", 0, 100, st.session_state.tank_pct)
 
 # --- 6. PROGNOSE & GRAFER ---
 p_data = []
@@ -120,8 +125,8 @@ def smooth_chart(df, y_col, color, title):
     st.subheader(title)
     st.line_chart(pd.DataFrame({y_col: y_smooth}), color=color)
 
-# Visning
-st.subheader("Prisudvikling")
+# Grafer
+st.subheader("Markeds-overblik")
 st.line_chart(pd.DataFrame({
     'Spot': el_df['SpotPriceDKK'].values,
     'Kedel': [st.session_state.bud_el]*48,
