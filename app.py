@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
 import numpy as np
+from datetime import datetime, timedelta
 from scipy.interpolate import make_interp_spline
 
 # --- 1. SETUP & SESSION STATE ---
@@ -25,29 +25,23 @@ def get_bio_produktion(tank_pct):
 st.set_page_config(page_title="Skuldelev V1", layout="wide")
 st.title("Skuldelev Drifts-Agent ⚡")
 
-# --- 2. DATA-HENTNING (MED FEJL-HÅNDTERING) ---
+# --- 2. DATA-HENTNING ---
 @st.cache_data(ttl=300)
 def hent_data():
     el_df, vejr_df = pd.DataFrame(), pd.DataFrame()
-    # Fix til El-API (Error char 0)
     try:
         url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=48&filter={'PriceArea':['DK2']}"
-        r = requests.get(url, timeout=5)
-        if r.status_code == 200:
-            el_df = pd.DataFrame(r.json()['records'])
-            el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
-            el_df = el_df.sort_values('Tid').reset_index(drop=True)
+        r = requests.get(url, timeout=5).json()['records']
+        el_df = pd.DataFrame(r)
+        el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
+        el_df = el_df.sort_values('Tid').reset_index(drop=True)
     except:
-        pass
-    
-    if el_df.empty:
         tider = [datetime.now().replace(minute=0, second=0) + timedelta(hours=i) for i in range(48)]
-        el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': [500 + 200*np.sin(i/4) for i in range(48)]})
+        el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': [500.0]*48})
 
-    # Vejr-API
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.0'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.1'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -96,18 +90,23 @@ for i in range(len(vejr_df)):
     p_data.append({'Tid': r['Tid'], 'Aftag': aftag, 'Tank': tank_v})
 df = pd.DataFrame(p_data)
 
-# --- 5. VISNING MED UDGLATNING ---
+# --- 5. VISNING MED SCIPY UDGLATNING ---
 def smooth_chart(df, y_col, color, title, y_range=None):
-    # Matematisk udglatning (Cubic Spline)
     x = np.arange(len(df))
-    x_new = np.linspace(0, len(df)-1, 300)
+    x_new = np.linspace(0, len(df)-1, 200) # Gør 48 punkter til 200 for blødhed
     spline = make_interp_spline(x, df[y_col], k=3)
     y_smooth = spline(x_new)
     
-    smooth_df = pd.DataFrame({'Tid_Index': x_new, y_col: y_smooth})
+    # Lav en dataframe til grafen
+    smooth_df = pd.DataFrame({
+        'Time': x_new,
+        y_col: y_smooth
+    }).set_index('Time')
+    
     st.subheader(title)
-    st.line_chart(smooth_df.set_index('Tid_Index')[y_col], color=color)
+    st.line_chart(smooth_df, color=color)
 
+# Elpris (Trappetrin er bedst her)
 st.subheader("Elpriser & Bud")
 el_plot = pd.DataFrame({
     'Tid': el_df['Tid'].dt.strftime('%H:00'),
@@ -119,5 +118,7 @@ st.line_chart(el_plot)
 
 st.divider()
 c1, c2 = st.columns(2)
-with c1: smooth_chart(df, 'Aftag', '#FF4B4B', 'Aftag (kW)')
-with c2: smooth_chart(df, 'Tank', '#0072B2', 'Tank (MWh)')
+with c1:
+    smooth_chart(df, 'Aftag', '#FF4B4B', 'Aftag (kW)')
+with c2:
+    smooth_chart(df, 'Tank', '#0072B2', 'Tank A Prognose (MWh)')
