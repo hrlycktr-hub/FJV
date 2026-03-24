@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from scipy.interpolate import make_interp_spline
 
-# --- 1. SETUP & INITIALISERING (Kun første gang) ---
+# --- 1. SETUP & INITIALISERING ---
 def init_state(key, value):
     if key not in st.session_state:
         st.session_state[key] = value
@@ -17,6 +17,8 @@ init_state('bud_el', 50.0)
 init_state('bud_mo', 800.0)
 init_state('temp_off', 0.0)
 init_state('vind_off', 0.0)
+init_state('sidste_el_data', pd.DataFrame()) # Gemmer selve dataene
+init_state('opdateret_tid', "Ingen data hentet endnu") # Gemmer tidspunktet
 
 TANK_A_MAX_MWH = 70.0  
 
@@ -26,25 +28,42 @@ def get_bio_produktion(tank_pct):
     elif tank_pct <= 90: return 600
     return 0
 
-st.set_page_config(page_title="Skuldelev V1", layout="wide")
+st.set_page_config(page_title="Skuldelev V1 - Drift", layout="wide")
 
-# --- 2. DATA-HENTNING ---
+# --- 2. DATA-HENTNING MED BACKUP-LOGIK ---
 @st.cache_data(ttl=300)
 def hent_data():
-    el_df, vejr_df = pd.DataFrame(), pd.DataFrame()
+    el_df = pd.DataFrame()
+    opdateret = st.session_state.opdateret_tid
+    
     try:
+        # Forsøg at hente nye spotpriser
         url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=48&filter={'PriceArea':['DK2']}"
-        r = requests.get(url, timeout=5).json()['records']
-        el_df = pd.DataFrame(r)
-        el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
-        el_df = el_df.sort_values('Tid').reset_index(drop=True)
-    except:
+        r = requests.get(url, timeout=5)
+        if r.status_code == 200:
+            data = r.json()['records']
+            if data:
+                el_df = pd.DataFrame(data)
+                el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
+                el_df = el_df.sort_values('Tid').reset_index(drop=True)
+                # Opdater session state med de nye friske data
+                st.session_state.sidste_el_data = el_df
+                st.session_state.opdateret_tid = datetime.now().strftime("%H:%M:%S (%d/%m)")
+                opdateret = st.session_state.opdateret_tid
+    except Exception as e:
+        # Hvis det fejler, bruger vi det vi har gemt i session_state
+        el_df = st.session_state.sidste_el_data
+    
+    # Hvis vi slet ikke har noget data endnu (f.eks. ved første kørsel uden net)
+    if el_df.empty:
         tider = [datetime.now().replace(minute=0, second=0) + timedelta(hours=i) for i in range(48)]
         el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': [500.0]*48})
+        opdateret = "Bruger nød-prognose (API utilgængelig)"
 
+    # Vejr-data
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.6'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.7'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -56,35 +75,11 @@ def hent_data():
     except:
         vejr_df = pd.DataFrame({'Tid': el_df['Tid'], 'Temp': [7.0]*48, 'Vind': [5.0]*48})
     
-    return el_df, vejr_df
+    return el_df, vejr_df, opdateret
 
-el_df, vejr_df = hent_data()
+el_df, vejr_df, sidste_update = hent_data()
 
-# --- 3. SIDEBAR: FASTE BOKSE MED KEYS ---
-with st.sidebar:
-    st.header("⚙️ Kontrolpanel")
-    
-    # BOKS 1: mFRR & BUD
-    with st.container(border=True):
-        st.subheader("📊 mFRR Bud")
-        st.number_input("Bud Elkedel", key='bud_el')
-        st.number_input("Bud Motor", key='bud_mo')
-    
-    # BOKS 2: SCADA TRIMNING
-    with st.container(border=True):
-        st.subheader("🔧 SCADA Trimning")
-        st.number_input("Basis (kW)", key='basis')
-        st.number_input("Respons", key='respons')
-        st.divider()
-        st.slider("Temp Offset", -5.0, 5.0, key='temp_off')
-        st.slider("Vind Offset", -10.0, 10.0, key='vind_off')
-
-    # BOKS 3: TANK
-    with st.container(border=True):
-        st.subheader("🔋 Tank Status")
-        st.slider("Aktuel %", 0, 100, key='tank_pct')
-
-# --- 4. BEREGNINGER (Bruger nu session_state direkte) ---
+# --- 3. BEREGNINGER ---
 nu_t = vejr_df['Temp'].iloc[0] + st.session_state.temp_off
 nu_v = max(0, vejr_df['Vind'].iloc[0] + st.session_state.vind_off)
 tf = max(0, (15 - nu_t) * 0.8)
@@ -95,8 +90,9 @@ t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
 t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
 tank_mwh_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 
-# --- 5. HOVEDSKÆRM: DASHBOARD ---
+# --- 4. HOVEDSKÆRM: DASHBOARD ---
 st.title("Skuldelev Drifts-Agent ⚡")
+st.caption(f"Sidste synkronisering med Energinet: **{sidste_update}**")
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Aktuel Effekt", f"{int(effekt_nu)} kW")
@@ -106,7 +102,25 @@ k4.metric("mFRR Timer", f"K:{t_kedel}t / M:{t_motor}t")
 
 st.divider()
 
-# PROGNOSE BEREGNING
+# --- 5. SIDEBAR: KONTROL-BOKSE ---
+with st.sidebar:
+    st.header("⚙️ Kontrolpanel")
+    with st.container(border=True):
+        st.subheader("📊 mFRR Bud")
+        st.number_input("Bud Elkedel", key='bud_el')
+        st.number_input("Bud Motor", key='bud_mo')
+    with st.container(border=True):
+        st.subheader("🔧 SCADA Trimning")
+        st.number_input("Basis (kW)", key='basis')
+        st.number_input("Respons", key='respons')
+        st.divider()
+        st.slider("Temp Offset", -5.0, 5.0, key='temp_off')
+        st.slider("Vind Offset", -10.0, 10.0, key='vind_off')
+    with st.container(border=True):
+        st.subheader("🔋 Tank Status")
+        st.slider("Aktuel %", 0, 100, key='tank_pct')
+
+# --- 6. PROGNOSE OG GRAFER ---
 p_data = []
 temp_tank = tank_mwh_nu
 for i in range(len(vejr_df)):
@@ -118,7 +132,6 @@ for i in range(len(vejr_df)):
     p_data.append({'Tid': i, 'Aftag': aftag, 'Tank': temp_tank})
 df_prog = pd.DataFrame(p_data)
 
-# GRAFER
 def smooth_chart(df, y_col, color, title):
     x = df['Tid'].values
     x_new = np.linspace(x.min(), x.max(), 300)
