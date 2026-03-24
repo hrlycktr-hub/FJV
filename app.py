@@ -10,17 +10,19 @@ def init_state(key, value):
     if key not in st.session_state:
         st.session_state[key] = value
 
-init_state('tank_pct', 44)
+init_state('tank_pct', 50) # Sat til 50 som standard nu
 init_state('basis', 1260)
 init_state('respons', 45)
 init_state('bud_el', 50.0)
 init_state('bud_mo', 800.0)
 init_state('temp_off', 0.0)
 init_state('vind_off', 0.0)
-init_state('sidste_el_data', pd.DataFrame()) # Gemmer selve dataene
-init_state('opdateret_tid', "Ingen data hentet endnu") # Gemmer tidspunktet
+init_state('sidste_el_data', pd.DataFrame())
+init_state('opdateret_tid', "Afventer synkronisering...")
 
-TANK_A_MAX_MWH = 70.0  
+# KORRIGERET TANK-LOGIK:
+# Hvis 50% = 25,2 MWh, så er den fulde kapacitet (100%) = 50,4 MWh
+TANK_A_MAX_MWH = 50.4  
 
 def get_bio_produktion(tank_pct):
     if tank_pct <= 30: return 1000
@@ -28,16 +30,14 @@ def get_bio_produktion(tank_pct):
     elif tank_pct <= 90: return 600
     return 0
 
-st.set_page_config(page_title="Skuldelev V1 - Drift", layout="wide")
+st.set_page_config(page_title="Skuldelev V1 - Korrigeret", layout="wide")
 
-# --- 2. DATA-HENTNING MED BACKUP-LOGIK ---
+# --- 2. DATA-HENTNING ---
 @st.cache_data(ttl=300)
 def hent_data():
     el_df = pd.DataFrame()
     opdateret = st.session_state.opdateret_tid
-    
     try:
-        # Forsøg at hente nye spotpriser
         url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=48&filter={'PriceArea':['DK2']}"
         r = requests.get(url, timeout=5)
         if r.status_code == 200:
@@ -46,24 +46,20 @@ def hent_data():
                 el_df = pd.DataFrame(data)
                 el_df['Tid'] = pd.to_datetime(el_df['HourDK']).dt.tz_localize(None)
                 el_df = el_df.sort_values('Tid').reset_index(drop=True)
-                # Opdater session state med de nye friske data
                 st.session_state.sidste_el_data = el_df
                 st.session_state.opdateret_tid = datetime.now().strftime("%H:%M:%S (%d/%m)")
                 opdateret = st.session_state.opdateret_tid
-    except Exception as e:
-        # Hvis det fejler, bruger vi det vi har gemt i session_state
+    except:
         el_df = st.session_state.sidste_el_data
     
-    # Hvis vi slet ikke har noget data endnu (f.eks. ved første kørsel uden net)
     if el_df.empty:
         tider = [datetime.now().replace(minute=0, second=0) + timedelta(hours=i) for i in range(48)]
         el_df = pd.DataFrame({'Tid': tider, 'SpotPriceDKK': [500.0]*48})
-        opdateret = "Bruger nød-prognose (API utilgængelig)"
+        opdateret = "Bruger backup-data"
 
-    # Vejr-data
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.7'}, timeout=5).json()
+        rv = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/2.8'}, timeout=5).json()
         rows = []
         for e in rv['properties']['timeseries'][:48]:
             rows.append({
@@ -88,11 +84,13 @@ effekt_nu = st.session_state.basis + (tf + vf - 10.3) * st.session_state.respons
 
 t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
 t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
+
+# NY BEREGNING: 50% af 50.4 MWh = 25.2 MWh
 tank_mwh_nu = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 
-# --- 4. HOVEDSKÆRM: DASHBOARD ---
+# --- 4. DASHBOARD ---
 st.title("Skuldelev Drifts-Agent ⚡")
-st.caption(f"Sidste synkronisering med Energinet: **{sidste_update}**")
+st.caption(f"Sidste synkronisering: {sidste_update}")
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Aktuel Effekt", f"{int(effekt_nu)} kW")
@@ -102,7 +100,7 @@ k4.metric("mFRR Timer", f"K:{t_kedel}t / M:{t_motor}t")
 
 st.divider()
 
-# --- 5. SIDEBAR: KONTROL-BOKSE ---
+# --- 5. SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Kontrolpanel")
     with st.container(border=True):
@@ -117,10 +115,10 @@ with st.sidebar:
         st.slider("Temp Offset", -5.0, 5.0, key='temp_off')
         st.slider("Vind Offset", -10.0, 10.0, key='vind_off')
     with st.container(border=True):
-        st.subheader("🔋 Tank Status")
+        st.subheader("🔋 Tank Niveau")
         st.slider("Aktuel %", 0, 100, key='tank_pct')
 
-# --- 6. PROGNOSE OG GRAFER ---
+# --- 6. PROGNOSE & GRAFER ---
 p_data = []
 temp_tank = tank_mwh_nu
 for i in range(len(vejr_df)):
@@ -128,7 +126,8 @@ for i in range(len(vejr_df)):
     tc = r['Temp'] + st.session_state.temp_off
     vc = max(0, r['Vind'] + st.session_state.vind_off)
     aftag = st.session_state.basis + (max(0,(15-tc)*0.8) + (3.0 if vc<3 else min(10,3+(vc-3)*0.77)) - 10.3) * st.session_state.respons
-    temp_tank = max(0, min(TANK_A_MAX_MWH, temp_tank + (get_bio_produktion((temp_tank/70)*100) - aftag)/1000))
+    # Beregn ændring i MWh baseret på ny total kapacitet
+    temp_tank = max(0, min(TANK_A_MAX_MWH, temp_tank + (get_bio_produktion((temp_tank/TANK_A_MAX_MWH)*100) - aftag)/1000))
     p_data.append({'Tid': i, 'Aftag': aftag, 'Tank': temp_tank})
 df_prog = pd.DataFrame(p_data)
 
@@ -140,7 +139,7 @@ def smooth_chart(df, y_col, color, title):
     st.subheader(title)
     st.line_chart(pd.DataFrame({y_col: y_smooth}), color=color)
 
-st.subheader("Spotpris & Bud")
+st.subheader("Pris-overblik")
 st.line_chart(pd.DataFrame({
     'Spot': el_df['SpotPriceDKK'].values,
     'Kedel': [st.session_state.bud_el]*48,
