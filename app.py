@@ -24,12 +24,11 @@ def get_bio_produktion(tank_pct):
 st.set_page_config(page_title="Skuldelev V1", layout="wide")
 st.title("Skuldelev Drifts-Agent ⚡")
 
-# --- 2. DATA-HENTNING (2026 DayAhead) ---
+# --- 2. DATA-HENTNING ---
 @st.cache_data(ttl=600)
 def hent_data():
     el_df, vejr_df = pd.DataFrame(), pd.DataFrame()
     try:
-        # Nyt endpoint for 2026
         url = "https://api.energidataservice.dk/dataset/DayAheadPrices?limit=100&filter={'PriceArea':['DK2']}"
         r = requests.get(url, timeout=5).json()['records']
         el_df = pd.DataFrame(r)
@@ -41,7 +40,7 @@ def hent_data():
 
     try:
         url_v = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=55.79&lon=12.02"
-        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.4'}, timeout=5).json()
+        r_v = requests.get(url_v, headers={'User-Agent': 'SkuldelevV1/1.5'}, timeout=5).json()
         rows = []
         for entry in r_v['properties']['timeseries'][:48]:
             rows.append({
@@ -57,11 +56,11 @@ def hent_data():
 
 el_df, vejr_df = hent_data()
 
-# --- 3. SIDEBAR: KONTROL, INFO-BOKSE & HER-OG-NU ---
+# --- 3. SIDEBAR: KONTROL & INFO ---
 with st.sidebar:
     st.header("SCADA Trimning")
     
-    # HER OG NU BEREGNING (Øverst for hurtig trim)
+    # Her og nu effekt beregning
     nu_t = vejr_df['Temp'].iloc[0] + st.session_state.temp_off
     nu_v = max(0, vejr_df['Vind'].iloc[0] + st.session_state.vind_off)
     tf = max(0, (15 - nu_t) * 0.8)
@@ -69,31 +68,32 @@ with st.sidebar:
     effekt_nu = st.session_state.basis + (tf + vf - 10.3) * st.session_state.respons
     
     st.metric("Beregnet Effekt NU", f"{int(effekt_nu)} kW")
-    st.caption(f"Baseret på: {round(nu_t,1)}°C og {round(nu_v,1)} m/s")
+    st.caption(f"Aktuelt vejr: {round(nu_t,1)}°C / {round(nu_v,1)} m/s")
     
     st.divider()
     st.session_state.basis = st.number_input("Basis (kW)", value=st.session_state.basis)
     st.session_state.respons = st.number_input("Respons", value=st.session_state.respons)
     
     st.divider()
-    st.subheader("mFRR Bud & Info-bokse")
+    st.subheader("mFRR Bud & Info")
     st.session_state.bud_el = st.number_input("Bud Elkedel", value=float(st.session_state.bud_el))
     t_kedel = len(el_df[el_df['SpotPriceDKK'] <= st.session_state.bud_el])
-    st.info(f"💡 Kedel kører i {t_kedel} timer")
+    st.info(f"💡 Kedel: {t_kedel} timer")
     
     st.session_state.bud_mo = st.number_input("Bud Motor", value=float(st.session_state.bud_mo))
     t_motor = len(el_df[el_df['SpotPriceDKK'] >= st.session_state.bud_mo])
-    st.warning(f"💡 Motor kører i {t_motor} timer")
+    st.warning(f"💡 Motor: {t_motor} timer")
 
     st.divider()
-    st.subheader("Vejr-station Offset")
+    st.subheader("Vejr & Tank")
     st.session_state.temp_off = st.slider("Temp Offset", -5.0, 5.0, st.session_state.temp_off)
     st.session_state.vind_off = st.slider("Vind Offset", -10.0, 10.0, st.session_state.vind_off)
     st.session_state.tank_pct = st.slider("Aktuel Tank %", 0, 100, st.session_state.tank_pct)
 
-# --- 4. DRIFTS-PROGNOSE (RENSER SAVTAKKER) ---
+# --- 4. DRIFTS-PROGNOSE (RENSER TID TIL 24T) ---
 prog = vejr_df.copy()
-prog['Tidspunkt'] = prog['Tid'].dt.floor('H')
+# TVUNGET 24-TIMERS FORMAT TIL GRAFERNE
+prog['Tid_24h'] = prog['Tid'].dt.strftime('%H:00')
 tank_val = (st.session_state.tank_pct / 100) * TANK_A_MAX_MWH
 b_log, a_log = [], []
 
@@ -112,9 +112,9 @@ for _, row in prog.iterrows():
 prog['Tank_MWh'], prog['Aftag_kW'] = b_log, a_log
 
 # --- 5. VISNING ---
-st.subheader("Elpriser & Budlinjer (DK2)")
+st.subheader("Elpriser & Budlinjer (24-timers visning)")
 el_plot = pd.DataFrame({
-    'Tid': el_df['Tid'],
+    'Tid': el_df['Tid'].dt.strftime('%H:00'),
     'Spotpris': el_df['SpotPriceDKK'].values,
     'Bud Elkedel': [st.session_state.bud_el] * len(el_df),
     'Bud Motor': [st.session_state.bud_mo] * len(el_df)
@@ -125,7 +125,7 @@ st.divider()
 c1, c2 = st.columns(2)
 with c1:
     st.subheader("Forventet Aftag (kW)")
-    st.line_chart(prog.set_index('Tidspunkt')['Aftag_kW'], color="#FF4B4B")
+    st.line_chart(prog.set_index('Tid_24h')['Aftag_kW'], color="#FF4B4B")
 with c2:
     st.subheader("Tank A Prognose (MWh)")
-    st.line_chart(prog.set_index('Tidspunkt')['Tank_MWh'], color="#0072B2")
+    st.line_chart(prog.set_index('Tid_24h')['Tank_MWh'], color="#0072B2")
