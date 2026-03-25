@@ -3,4 +3,3 @@ pandas
 requests
 numpy
 scipy
-plotly
